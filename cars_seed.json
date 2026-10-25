@@ -1,0 +1,5 @@
+[
+  {"name": "BYD LEOPARD 8", "price": 9000, "total": 4000, "draw_in_days": 7},
+  {"name": "FSR",           "price": 9000, "total": 4000, "draw_in_days": 7},
+  {"name": "Sino Cassoni",  "price": 9000, "total": 4000, "draw_in_days": 7}
+]
