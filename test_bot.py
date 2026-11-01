@@ -24,7 +24,7 @@ def expire(where, params):
 
 
 # ---------------- DB layer
-cid = S.add_car("Sino Cassoni", 9000, 4000, None, now + 86400)
+cid = S.add_car("Jetour", 9000, 4000, None, now + 86400)
 u1 = S.upsert_user(1, "Alice", "alice"); assert u1["lang"] == "en" and u1["id"] == 1
 S.upsert_user(2, "Bob", None); S.upsert_user(10**11, "BigId", None)
 assert S.get_user(10**11)["id"] == 10**11
@@ -39,7 +39,7 @@ expire("number=2 AND car_id=%s", (cid,))
 assert S.taken_count(cid) == 1
 assert S.reserve(cid, 2, 2, 30, 20) == "ok"            # expired number can be re-taken
 expire("user_id=2", ())
-sw = S.sweep_expired(); assert len(sw) == 1 and sw[0][0] == 2 and sw[0][3] == [2] and sw[0][2] == "Sino Cassoni", sw
+sw = S.sweep_expired(); assert len(sw) == 1 and sw[0][0] == 2 and sw[0][3] == [2] and sw[0][2] == "Jetour", sw
 assert S.sweep_expired() == []
 pays = S.create_payments(1, "FILE", "photo")
 assert len(pays) == 1 and pays[0]["amount"] == 9000 and pays[0]["numbers"] == [4000], pays
@@ -393,17 +393,134 @@ async def unlimited_test():
 
 asyncio.run(unlimited_test())
 
+# ---------------- admin panel: edit + delete a car
+async def edit_delete_test():
+    ctx = mk_ctx(); T = int(time.time())
+    A = S.add_car("Edit A", 1000, 300, None, T + 86400)
+    B = S.add_car("Edit B", 2000, 300, None, T + 86400)
+    for u in (93, 94, 95): S.upsert_user(u, f"E{u}", f"e{u}")
+    text, kb = await bot.panel_view()
+    datas = [b.callback_data for r in kb.inline_keyboard for b in r]
+    assert f"pnl:edit:{A}" in datas and f"pnl:del:{B}" in datas and all(len(d) <= 64 for d in datas)
+    import re as _re
+    pat = _re.compile(r"^pnl:(main|date:\d+|ext:\d+:\d+|set:\d+|reset:\d+|rst:\d+|edit:\d+|fld:\d+:(name|price|total)|pic:\d+|vis:\d+|del:\d+|dlt:\d+)$")
+    text, kb = bot.edit_view(S.get_car(A))
+    edatas = [b.callback_data for r in kb.inline_keyboard for b in r]
+    assert all(pat.match(d) and len(d) <= 64 for d in edatas + datas), edatas
+    # non-admin cannot use the new buttons
+    for d in (f"pnl:edit:{A}", f"pnl:fld:{A}:price", f"pnl:pic:{A}", f"pnl:vis:{A}", f"pnl:del:{A}", f"pnl:dlt:{A}"):
+        up, q = mk_cb(93, d); await bot.cb_panel(up, ctx)
+        assert q.answer.call_args.args[0] == "Not authorized."
+    assert S.get_car(A) is not None and S.get_car(A)["active"] == 1
+    # --- edit menu
+    up, q = mk_cb(999, f"pnl:edit:{A}"); await bot.cb_panel(up, ctx)
+    assert "Edit A" in q.edit_message_text.call_args.args[0]
+    # --- price
+    up, q = mk_cb(999, f"pnl:fld:{A}:price"); await bot.cb_panel(up, ctx)
+    assert ctx.user_data["await_edit"] == (A, "price")
+    up, m = mk_msg(999, "abc"); await bot.on_text(up, ctx)
+    assert S.get_car(A)["price"] == 1000 and ctx.user_data.get("await_edit") == (A, "price")
+    up, m = mk_msg(999, "0"); await bot.on_text(up, ctx); assert S.get_car(A)["price"] == 1000
+    up, m = mk_msg(999, "2,500"); await bot.on_text(up, ctx)
+    assert S.get_car(A)["price"] == 2500 and "await_edit" not in ctx.user_data
+    assert "updated" in m.reply_text.call_args.args[0]
+    assert S.get_car(B)["price"] == 2000                                  # other car untouched
+    # --- name
+    up, q = mk_cb(999, f"pnl:fld:{A}:name"); await bot.cb_panel(up, ctx)
+    up, m = mk_msg(999, "x" * 61); await bot.on_text(up, ctx); assert S.get_car(A)["name"] == "Edit A"
+    up, m = mk_msg(999, "Renamed A"); await bot.on_text(up, ctx)
+    assert S.get_car(A)["name"] == "Renamed A" and "await_edit" not in ctx.user_data
+    # --- total tickets (cannot go below a taken number, nor above the max)
+    assert S.reserve(A, 50, 93, 30, 20) == "ok"
+    up, q = mk_cb(999, f"pnl:fld:{A}:total"); await bot.cb_panel(up, ctx)
+    up, m = mk_msg(999, "40"); await bot.on_text(up, ctx)
+    assert S.get_car(A)["total"] == 300 and "Cannot go below 50" in m.reply_text.call_args.args[0]
+    up, m = mk_msg(999, str(config.MAX_TOTAL + 1)); await bot.on_text(up, ctx); assert S.get_car(A)["total"] == 300
+    up, m = mk_msg(999, "500"); await bot.on_text(up, ctx); assert S.get_car(A)["total"] == 500
+    S.release_user_reserved(93)
+    # a normal user typing is not treated as an edit
+    ctx_u = mk_ctx(); ctx_u.user_data["await_edit"] = (A, "price")
+    up, m = mk_msg(93, "7"); await bot.on_text(up, ctx_u); assert S.get_car(A)["price"] == 2500
+    # /panel and Panel button cancel pending input
+    up, q = mk_cb(999, f"pnl:fld:{A}:price"); await bot.cb_panel(up, ctx)
+    up, m = mk_msg(999, "/panel"); await bot.cmd_panel(up, ctx); assert "await_edit" not in ctx.user_data
+    up, q = mk_cb(999, f"pnl:pic:{A}"); await bot.cb_panel(up, ctx); assert ctx.user_data["await_photo"] == A
+    up, q = mk_cb(999, "pnl:main"); await bot.cb_panel(up, ctx); assert "await_photo" not in ctx.user_data
+    # bad field in callback is ignored
+    up, q = mk_cb(999, f"pnl:fld:{A}:drawn"); await bot.cb_panel(up, ctx); assert "await_edit" not in ctx.user_data
+    # --- hide / show
+    up, q = mk_cb(999, f"pnl:vis:{A}"); await bot.cb_panel(up, ctx)
+    assert S.get_car(A)["active"] == 0 and all(c["id"] != A for c in S.active_cars())
+    up, q = mk_cb(999, f"pnl:vis:{A}"); await bot.cb_panel(up, ctx); assert S.get_car(A)["active"] == 1
+    # --- picture
+    up, q = mk_cb(999, f"pnl:pic:{A}"); await bot.cb_panel(up, ctx)
+    up, m = mk_msg(999); m.document = NS(file_id="DOC"); await bot.on_media(up, ctx)       # a file is refused
+    assert S.get_car(A)["photo"] is None and ctx.user_data.get("await_photo") == A
+    up, m = mk_msg(999, photo=True); await bot.on_media(up, ctx)
+    ca = S.get_car(A); assert ca["photo"] == "PH" and ca["photo_hash"] == "manual" and "await_photo" not in ctx.user_data
+    # --- delete: build sold + pending + held on A, and a payment on B
+    def buy(uid, car, nums):
+        for n in nums: assert S.reserve(car, n, uid, 30, 20) == "ok"
+    buy(93, A, [1, 2]); p_sold = S.create_payments(93, "G1", "photo")[0]["payment_id"]; S.decide_payment(p_sold, True, 999)
+    buy(94, A, [5]);    p_pend = S.create_payments(94, "G2", "photo")[0]["payment_id"]
+    S.save_admin_msg(p_pend, 999, 556)
+    buy(95, A, [9])
+    buy(93, B, [4]);    p_b = S.create_payments(93, "G3", "photo")[0]["payment_id"]
+    ctxd = mk_ctx()
+    up, q = mk_cb(999, f"pnl:del:{A}"); await bot.cb_panel(up, ctxd)           # confirmation changes nothing
+    shown = q.edit_message_text.call_args.args[0]
+    assert "sold: 2" in shown and "NOT been done" in shown and S.get_car(A) is not None
+    # backup failure -> nothing deleted
+    from telegram.error import TelegramError
+    ctxf = mk_ctx(); ctxf.bot.send_document = AsyncMock(side_effect=TelegramError("down"))
+    up, q = mk_cb(999, f"pnl:dlt:{A}"); await bot.cb_panel(up, ctxf)
+    assert S.get_car(A) is not None and S.car_stats(A)["sold"] == 2 and "nothing was deleted" in q.edit_message_text.call_args.args[0]
+    # confirm
+    up, q = mk_cb(999, f"pnl:dlt:{A}"); await bot.cb_panel(up, ctxd)
+    doc = ctxd.bot.send_document.call_args
+    assert doc.args[0] == 999 and b"number,status" in doc.args[1].getvalue() and b"sold" in doc.args[1].getvalue()
+    assert S.get_car(A) is None and all(c["id"] != A for c in S.all_cars())
+    assert S.taken_numbers(A, 1, 300) == set() and S.payment_full(p_sold) is None and S.payment_full(p_pend) is None
+    assert any(c.args[0] == 94 for c in ctxd.bot.send_message.call_args_list)       # waiting customer told
+    ctxd.bot.edit_message_caption.assert_awaited()
+    assert "was deleted" in q.edit_message_text.call_args.args[0]
+    # other car untouched
+    assert S.get_car(B) is not None and S.car_stats(B)["pending"] == 1 and S.payment_full(p_b)["status"] == "pending"
+    assert S.get_car(B)["price"] == 2000 and S.taken_numbers(B, 1, 300) == {4}
+    assert S.pending_payment_ids().count(p_pend) == 0
+    # a customer using the deleted car gets a clean "closed", and a stale button does not crash the panel
+    assert S.reserve(A, 3, 95, 30, 20) == "closed"
+    up, q = mk_cb(999, f"pnl:edit:{A}"); await bot.cb_panel(up, ctxd); assert q.answer.call_args.args[0] == "Car not found."
+    up, q = mk_cb(999, f"pnl:dlt:{A}"); await bot.cb_panel(up, ctxd); assert q.answer.call_args.args[0] == "Car not found."
+    # the panel and /cars still work
+    text, kb = await bot.panel_view(); assert "Edit B" in text and "Renamed A" not in text
+    up, m = mk_msg(999, "/cars"); await bot.cmd_cars(up, ctxd)
+    # deleting a DRAWN car works too; deleting the last cars leaves a usable panel
+    buy(93, B, [7]); pid = S.create_payments(93, "G5", "photo")[0]["payment_id"]
+    S.decide_payment(pid, True, 999); S.decide_payment(p_b, True, 999)
+    assert S.draw(B) is not None
+    up, q = mk_cb(999, f"pnl:dlt:{B}"); await bot.cb_panel(up, ctxd); assert S.get_car(B) is None
+    print("EDIT+DELETE OK")
+
+asyncio.run(edit_delete_test())
+
 # ---------------- seeding + photos
 with S._pool.connection() as c:
     c.execute("TRUNCATE cars, tickets, payments, admin_msgs RESTART IDENTITY")
-assert bot.seed_cars() == 3 and bot.seed_cars() == 0           # only once
+assert bot.seed_cars() == 1 and bot.seed_cars() == 0           # only once
 cars = S.all_cars()
-assert [c["name"] for c in cars] == ["BYD LEOPARD 8", "FSR", "Sino Cassoni"], cars
-assert all(c["price"] == 9000 and c["total"] == 4000 and c["active"] == 1 for c in cars)
+assert [c["name"] for c in cars] == ["Jetour"], cars
+assert all(c["price"] == 3000 and c["total"] == 4000 and c["active"] == 1 for c in cars)
 assert all(6.9 * 86400 < c["deadline"] - time.time() < 7.1 * 86400 for c in cars)
-assert [bool(bot.find_car_photo(c)) for c in cars] == [True, True, True]
-assert bot.car_slug("BYD LEOPARD 8") == "byd-leopard-8"
+assert bot.car_slug("Jetour") == "jetour"
+assert [bool(bot.find_car_photo(c)) for c in cars] == [True]    # photos/jetour.jpg is shipped
+# photo tests use a temporary photos folder with a generated jetour.jpg
+import tempfile, pathlib
 from PIL import Image
+_tmp = pathlib.Path(tempfile.mkdtemp())
+Image.new("RGB", (64, 48), (200, 30, 30)).save(_tmp / "jetour.jpg", "JPEG")
+bot.config.PHOTOS_DIR = _tmp
+assert [bool(bot.find_car_photo(c)) for c in cars] == [True]
 for c in cars:
     im = Image.open(bot.find_car_photo(c)); assert im.format == "JPEG" and sum(im.size) < 10000 and max(im.size) / min(im.size) < 20
 
@@ -412,9 +529,9 @@ async def photo_test():
     ctx = mk_ctx()
     ctx.bot.send_photo = AsyncMock(return_value=NS(message_id=1, photo=[NS(file_id="small"), NS(file_id="FILEID-1")]))
     byname = {c["name"]: c for c in S.all_cars()}
-    sino, byd, fsr = byname["Sino Cassoni"], byname["BYD LEOPARD 8"], byname["FSR"]
-    # every car uploads its own local picture the first time
-    for car in (byd, fsr, sino):
+    sino = byname["Jetour"]
+    # the car uploads its own local picture the first time
+    for car in (sino,):
         ctx.bot.send_photo.reset_mock()
         up, q = mk_cb(70, f"car:{car['id']}"); await bot.cb_car(up, ctx)
         sent = ctx.bot.send_photo.call_args.args[1]
@@ -445,17 +562,17 @@ async def photo_test():
     assert "No Pic Car" in ctx.bot.send_message.call_args.args[1]
     # upload failure falls back to a text card instead of crashing
     from telegram.error import BadRequest
-    S.set_car_photo(fsr["id"], None, None)
+    S.set_car_photo(sino["id"], None, None)
     ctx.bot.send_photo = AsyncMock(side_effect=BadRequest("boom"))
     ctx.bot.send_message.reset_mock()
-    up, q = mk_cb(71, f"car:{fsr['id']}"); await bot.cb_car(up, ctx)
-    assert "FSR" in ctx.bot.send_message.call_args.args[1]
-    # Register lists all three
+    up, q = mk_cb(71, f"car:{sino['id']}"); await bot.cb_car(up, ctx)
+    assert "Jetour" in ctx.bot.send_message.call_args.args[1]
+    # Register lists the car
     ctx2 = mk_ctx()
     S.set_car_field(nopic, "active", 0)
     await bot.send_car_list(ctx2.bot, 70, "en")
     kb = ctx2.bot.send_message.call_args.kwargs["reply_markup"]
-    assert [r[0].text for r in kb.inline_keyboard[:3]] == ["🚗 BYD LEOPARD 8", "🚙 FSR", "🚐 Sino Cassoni"]
+    assert [r[0].text for r in kb.inline_keyboard[:1]] == ["🚗 Jetour"]
     print("SEED+PHOTO OK")
 
 asyncio.run(photo_test())

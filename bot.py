@@ -661,6 +661,9 @@ async def on_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_admin(user.id) and msg.photo and ADMIN_MEDIA_RE.match(msg.caption or ""):
         return await admin_photo_cmd(update, ctx)
+    pic_car = ctx.user_data.get("await_photo")
+    if pic_car and is_admin(user.id):
+        return await handle_photo_input(update, ctx, pic_car)
 
     row = await touch(update)
     lang = row["lang"]
@@ -709,6 +712,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     car_id = ctx.user_data.get("await_date")
     if car_id and is_admin(update.effective_user.id):
         await handle_date_input(update, ctx, car_id)
+        return
+    edit_req = ctx.user_data.get("await_edit")
+    if edit_req and is_admin(update.effective_user.id):
+        await handle_edit_input(update, ctx, *edit_req)
         return
     if row["awaiting_phone"]:
         await save_phone(update, ctx, update.effective_message.text)
@@ -781,7 +788,7 @@ ADMIN_HELP = (
     "/addcar Name | price | total tickets | YYYY-MM-DD HH:MM\n"
     "  (send it as a photo caption to attach the car picture)\n"
     "/setphoto &lt;id&gt; — send as a photo caption to change the picture\n"
-    "/panel — buttons: change draw date / reset a car's tickets\n"
+    "/panel — buttons: edit / delete a car, change its name, price, tickets, picture, date, reset its tickets\n"
     "/cars — list all cars\n"
     "/setdeadline &lt;id&gt; YYYY-MM-DD HH:MM\n"
     "/setprice &lt;id&gt; &lt;price&gt;\n"
@@ -805,7 +812,7 @@ async def cmd_admin(update, ctx):
 
 @admin_only
 async def cmd_panel(update, ctx):
-    ctx.user_data.pop("await_date", None)
+    _clear_awaits(ctx)
     text, kb = await panel_view()
     await update.effective_message.reply_text(text, parse_mode=HTML, reply_markup=kb)
 
@@ -1064,7 +1071,98 @@ async def panel_view():
             f"✅ sold {st['sold']} · ⏳ pending {st['pending']} · 🕒 held {st['reserved']} / {fmt(c['total'])}"
         )
         rows.append([_btn(f"📅 Date #{c['id']}", f"pnl:date:{c['id']}"), _btn(f"🧹 Reset #{c['id']}", f"pnl:reset:{c['id']}")])
+        rows.append([_btn(f"✏️ Edit #{c['id']}", f"pnl:edit:{c['id']}"), _btn(f"🗑 Delete #{c['id']}", f"pnl:del:{c['id']}")])
     return "\n".join(parts), InlineKeyboardMarkup(rows)
+
+
+def _clear_awaits(ctx):
+    for k in ("await_date", "await_edit", "await_photo"):
+        ctx.user_data.pop(k, None)
+
+
+def edit_view(car, note=""):
+    cid = car["id"]
+    state = "DRAWN" if car["drawn"] else ("visible" if car["active"] else "hidden")
+    text = (
+        f"✏️ <b>Edit car #{cid}</b> [{state}]\n\n"
+        f"Name: <b>{e(car['name'])}</b>\n"
+        f"Price: <b>{fmt(car['price'])}</b> birr\n"
+        f"Tickets: <b>{fmt(car['total'])}</b>\n"
+        f"Draw date: <b>{fmt_date(car['deadline'])}</b>\n"
+        f"Picture: {'🖼 yes' if car['photo'] else 'no picture'}\n\n"
+        f"Tap what you want to change."
+    )
+    if note:
+        text = note + "\n\n" + text
+    kb = InlineKeyboardMarkup(
+        [
+            [_btn("✏️ Name", f"pnl:fld:{cid}:name"), _btn("💰 Price", f"pnl:fld:{cid}:price")],
+            [_btn("🎟 Tickets", f"pnl:fld:{cid}:total"), _btn("📅 Draw date", f"pnl:date:{cid}")],
+            [_btn("🖼 Picture", f"pnl:pic:{cid}"), _btn("🙈 Hide" if car["active"] else "👁 Show", f"pnl:vis:{cid}")],
+            [_btn("🗑 Delete car", f"pnl:del:{cid}")],
+            [_btn("⬅️ Panel", "pnl:main")],
+        ]
+    )
+    return text, kb
+
+
+FIELD_PROMPTS = {
+    "name": "the new <b>name</b> (1-60 characters)",
+    "price": "the new <b>price</b> in birr (a whole number). It applies to new reservations",
+    "total": "the new <b>number of tickets</b> (a whole number, 1-%d)" % config.MAX_TOTAL,
+}
+
+
+async def handle_edit_input(update, ctx, car_id, field):
+    msg = update.effective_message
+    car = await db.get_car(car_id)
+    if not car:
+        ctx.user_data.pop("await_edit", None)
+        await msg.reply_text("This car no longer exists.")
+        return
+    raw = (msg.text or "").strip()
+    if field == "name":
+        if not raw or len(raw) > 60:
+            await msg.reply_text("Name must be 1-60 characters. Try again (or /panel to cancel).")
+            return
+        value = raw
+    else:
+        digits = re.sub(r"[,\s]", "", raw)
+        if not digits.isdigit() or int(digits) <= 0:
+            await msg.reply_text("Send a whole number greater than 0 (or /panel to cancel).")
+            return
+        value = int(digits)
+        if field == "total":
+            if value > config.MAX_TOTAL:
+                await msg.reply_text(f"Tickets must be between 1 and {config.MAX_TOTAL}. Try again (or /panel to cancel).")
+                return
+            top = await db.max_ticket_number(car_id)
+            if value < top:
+                await msg.reply_text(f"Cannot go below {top}: that number is already taken. Try again (or /panel to cancel).")
+                return
+    ctx.user_data.pop("await_edit", None)
+    await db.set_car_field(car_id, field, value)
+    car = await db.get_car(car_id)
+    label = {"name": "Name", "price": "Price", "total": "Tickets"}[field]
+    text, kb = edit_view(car, f"✅ {label} updated.")
+    await msg.reply_text(text, parse_mode=HTML, reply_markup=kb)
+
+
+async def handle_photo_input(update, ctx, car_id):
+    msg = update.effective_message
+    car = await db.get_car(car_id)
+    if not car:
+        ctx.user_data.pop("await_photo", None)
+        await msg.reply_text("This car no longer exists.")
+        return
+    if not msg.photo:
+        await msg.reply_text("Please send the picture as a normal photo (not as a file), or /panel to cancel.")
+        return
+    ctx.user_data.pop("await_photo", None)
+    await db.set_car_photo(car_id, msg.photo[-1].file_id, "manual")
+    car = await db.get_car(car_id)
+    text, kb = edit_view(car, "✅ Picture updated.")
+    await msg.reply_text(text, parse_mode=HTML, reply_markup=kb)
 
 
 def date_menu_view(car, note=""):
@@ -1129,7 +1227,7 @@ async def cb_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
 
     if action == "main":
-        ctx.user_data.pop("await_date", None)
+        _clear_awaits(ctx)
         await q.answer()
         text, kb = await panel_view()
         await safe_edit(q, text, kb)
@@ -1140,7 +1238,108 @@ async def cb_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("Car not found.", show_alert=True)
         return
 
-    if action == "date":
+    if action == "edit":
+        _clear_awaits(ctx)
+        await q.answer()
+        text, kb = edit_view(car)
+        await safe_edit(q, text, kb)
+
+    elif action == "fld":
+        field = parts[3] if len(parts) > 3 else ""
+        if field not in FIELD_PROMPTS:
+            await q.answer()
+            return
+        _clear_awaits(ctx)
+        ctx.user_data["await_edit"] = (car["id"], field)
+        await q.answer()
+        await ctx.bot.send_message(
+            q.message.chat_id,
+            f"✏️ <b>{e(car['name'])}</b>: send {FIELD_PROMPTS[field]}.\nSend /panel to cancel.",
+            parse_mode=HTML,
+        )
+
+    elif action == "pic":
+        _clear_awaits(ctx)
+        ctx.user_data["await_photo"] = car["id"]
+        await q.answer()
+        await ctx.bot.send_message(
+            q.message.chat_id,
+            f"🖼 Send the new picture for <b>{e(car['name'])}</b> as a photo.\nSend /panel to cancel.",
+            parse_mode=HTML,
+        )
+
+    elif action == "vis":
+        new = 0 if car["active"] else 1
+        await db.set_car_field(car["id"], "active", new)
+        await q.answer("Visible ✅" if new else "Hidden ✅")
+        car["active"] = new
+        text, kb = edit_view(car)
+        await safe_edit(q, text, kb)
+
+    elif action == "del":
+        await q.answer()
+        st = await db.car_stats(car["id"])
+        warn = ""
+        if st["sold"]:
+            warn = f"\n⚠️ {st['sold']} paid ticket(s) will be erased" + ("" if car["drawn"] else " and the draw has NOT been done") + "."
+        text = (
+            f"🗑 <b>Delete {e(car['name'])}?</b>\n\n"
+            f"✅ sold: {st['sold']}\n⏳ waiting confirmation: {st['pending']}\n🕒 held (unpaid): {st['reserved']}\n\n"
+            f"The car and ALL its tickets and payments are removed for good. "
+            f"Waiting payments are cancelled and those customers are told. "
+            f"A CSV backup of the tickets is sent to you first. Other cars are not touched.{warn}\n\n"
+            f"To keep the car but hide it from customers, use ✏️ Edit → 🙈 Hide instead."
+        )
+        kb = InlineKeyboardMarkup(
+            [[_btn("🗑 Yes, delete", f"pnl:dlt:{car['id']}"), _btn("❌ Cancel", "pnl:main")]]
+        )
+        await safe_edit(q, text, kb)
+
+    elif action == "dlt":
+        await q.answer("Working…")
+        rows = await db.sold_rows(car["id"])
+        try:  # backup first: if it cannot be delivered, nothing is deleted
+            await ctx.bot.send_document(
+                q.message.chat_id,
+                csv_file(rows, f"backup_{car_slug(car['name'])}_{int(time.time())}.csv"),
+                caption=f"Backup before delete: {len(rows)} ticket(s)",
+            )
+        except TelegramError as ex:
+            log.warning("backup failed: %s", ex)
+            await safe_edit(q, "❌ Could not send the CSV backup, so nothing was deleted. Try again.", None)
+            return
+        res = await db.delete_car(car["id"], admin.id)
+        if not res:
+            await safe_edit(q, "Car not found.", None)
+            return
+        _clear_awaits(ctx)
+        for p in res["pending_payments"]:
+            try:
+                await ctx.bot.send_message(
+                    p["user_id"],
+                    t(p["lang"], "rejected_user", car=e(p["car_name"]), nums=nums_str(p["numbers"])),
+                    parse_mode=HTML,
+                )
+            except TelegramError:
+                pass
+            for m in p["admin_msgs"]:
+                try:
+                    await ctx.bot.edit_message_caption(
+                        chat_id=m["chat_id"], message_id=m["message_id"],
+                        caption=admin_caption(p, "🗑 CANCELLED: car was deleted"), parse_mode=HTML, reply_markup=None,
+                    )
+                except TelegramError:
+                    pass
+        log.info("Car %s deleted by admin %s: %s", car["id"], admin.id, res["removed"])
+        rm = res["removed"]
+        text = (
+            f"✅ <b>{e(car['name'])}</b> was deleted.\n"
+            f"Removed: sold {rm['sold']}, waiting {rm['pending']}, held {rm['reserved']}."
+        )
+        kb = InlineKeyboardMarkup([[_btn("⬅️ Panel", "pnl:main")]])
+        await safe_edit(q, text, kb)
+
+    elif action == "date":
         await q.answer()
         text, kb = date_menu_view(car)
         await safe_edit(q, text, kb)
@@ -1165,6 +1364,7 @@ async def cb_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if car["drawn"]:
             await q.answer("Already drawn: reset the car first.", show_alert=True)
             return
+        _clear_awaits(ctx)
         ctx.user_data["await_date"] = car["id"]
         await q.answer()
         await ctx.bot.send_message(
@@ -1286,7 +1486,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(cb_taken, pattern=r"^taken$"))
     app.add_handler(CallbackQueryHandler(cb_back, pattern=r"^back:(cars|menu)$"))
     app.add_handler(CallbackQueryHandler(cb_admin, pattern=r"^adm:(ok|no):\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^pnl:(main|date:\d+|ext:\d+:\d+|set:\d+|reset:\d+|rst:\d+)$"))
+    app.add_handler(CallbackQueryHandler(cb_panel, pattern=r"^pnl:(main|date:\d+|ext:\d+:\d+|set:\d+|reset:\d+|rst:\d+|edit:\d+|fld:\d+:(name|price|total)|pic:\d+|vis:\d+|del:\d+|dlt:\d+)$"))
 
     app.add_handler(MessageHandler(pm & filters.TEXT & filters.Text(list(MENU_LABELS)), on_menu))
     app.add_handler(MessageHandler(pm & filters.CONTACT, on_contact))

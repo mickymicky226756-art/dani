@@ -25,7 +25,7 @@ ADMIN_IDS = {
     if x.strip().lstrip("-").isdigit()
 }
 
-BRAND_NAME = os.getenv("BRAND_NAME", "Gecho Car Lottery").strip()
+BRAND_NAME = os.getenv("BRAND_NAME", "Dani Online").strip()
 
 # Payment details shown to customers (leave a line empty to hide it)
 CBE_ACCOUNT = os.getenv("CBE_ACCOUNT", "").strip()

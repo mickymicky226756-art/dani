@@ -12,10 +12,10 @@ python bot.py
 ```
 1. Start the bot, send `/myid`, put that number in `ADMIN_IDS` in `.env`, restart.
 2. Admins must press /start on the bot once so it can DM them payment screenshots.
-3. The three cars in `cars_seed.json` (BYD LEOPARD 8, FSR, Sino Cassoni) are created automatically the first time the bot starts on an empty database. Edit that file BEFORE the first start to change prices / ticket counts / draw time. Afterwards use /setprice, /settotal, /setdeadline.
-   Car pictures: put `byd-leopard-8.jpg`, `fsr.jpg`, `sino-cassoni.jpg` in the `photos` folder (see photos/README.txt).
+3. The car in `cars_seed.json` (Jetour) is created automatically the first time the bot starts on an empty database. Edit that file BEFORE the first start to change price / ticket count / draw time. Afterwards use /setprice, /settotal, /setdeadline.
+   Car picture: put `jetour.jpg` in the `photos` folder (see photos/README.txt).
    To create another car manually (send a photo with this caption):
-   `/addcar Sino Cassoni | 9000 | 4000 | 2026-11-01 20:00`
+   `/addcar Jetour | 9000 | 4000 | 2026-11-01 20:00`
    (name | price in birr | number of tickets | draw date/time, UTC+3 by default)
 
 ## Customer flow (several numbers, one payment)
@@ -27,7 +27,8 @@ number held for 30 min + payment info → send screenshot → send phone → adm
 `/cancel` releases held numbers. Expired holds are released automatically (user is notified).
 
 ## Admin panel (buttons)
-`/panel` (also shown by `/admin`): for every car a **📅 Date** button (+1 / +3 / +7 / +30 days, or type an exact date) and a **🧹 Reset** button.
+`/panel` (also shown by `/admin`): for every car a **📅 Date** button (+1 / +3 / +7 / +30 days, or type an exact date), a **🧹 Reset** button, a **✏️ Edit** button and a **🗑 Delete** button.
+**✏️ Edit** opens a menu to change the car's name, price, number of tickets, draw date and picture, or to hide/show it. **🗑 Delete** asks for confirmation, sends you a CSV backup of the tickets, then removes the car with all its tickets and payments (waiting customers are told). Other cars are never touched.
 Reset asks for confirmation, first sends you a CSV backup of the tickets, then frees ALL numbers of that car, cancels waiting payments (customers are told) and re-opens the car for the next round (set the new date afterwards). Other cars are never touched.
 
 ## Admin commands (`/admin` shows them)

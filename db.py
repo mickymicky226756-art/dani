@@ -470,6 +470,44 @@ def reset_car(car_id, admin_id):
     return {"pending_payments": pend, "removed": counts}
 
 
+def delete_car(car_id, admin_id):
+    """Remove one car completely: its tickets, payments and admin messages.
+
+    - pending payments are rejected first (returned, with the admin message ids, so the caller can tell
+      the customers / update the admins' messages)
+    Other cars are never touched. Returns None when the car does not exist.
+    """
+    with _pool.connection() as c:
+        car = c.execute("SELECT id FROM cars WHERE id=%s FOR UPDATE", (car_id,)).fetchone()
+        if not car:
+            return None
+        pend = c.execute(
+            "SELECT p.id, p.user_id, p.car_id, p.amount, p.file_kind, u.lang, u.name AS user_name, "
+            "u.username, u.phone, cr.name AS car_name "
+            "FROM payments p JOIN users u ON u.id=p.user_id JOIN cars cr ON cr.id=p.car_id "
+            "WHERE p.car_id=%s AND p.status='pending' ORDER BY p.id",
+            (car_id,),
+        ).fetchall()
+        for p in pend:
+            p["numbers"] = [
+                r["number"]
+                for r in c.execute(
+                    "SELECT number FROM tickets WHERE payment_id=%s ORDER BY number", (p["id"],)
+                ).fetchall()
+            ]
+            p["admin_msgs"] = c.execute(
+                "SELECT chat_id, message_id FROM admin_msgs WHERE payment_id=%s", (p["id"],)
+            ).fetchall()
+        removed = c.execute("DELETE FROM tickets WHERE car_id=%s RETURNING status", (car_id,)).fetchall()
+        c.execute("DELETE FROM admin_msgs WHERE payment_id IN (SELECT id FROM payments WHERE car_id=%s)", (car_id,))
+        c.execute("DELETE FROM payments WHERE car_id=%s", (car_id,))
+        c.execute("DELETE FROM cars WHERE id=%s", (car_id,))
+    counts = {"sold": 0, "pending": 0, "reserved": 0}
+    for r in removed:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"pending_payments": pend, "removed": counts}
+
+
 def draw(car_id):
     """Pick a random winner among SOLD tickets and close the car. None if impossible."""
     with _pool.connection() as c:
